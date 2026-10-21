@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.py[cod]
+hand_landmarker.task
+*.pt
+!models/
+!models/self_other_yolo11s_75e.pt
+outputs/
+*.mp4
+*.mov
+*.avi
+*.mkv
