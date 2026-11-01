@@ -1,4 +1,7 @@
 .venv/
+.DS_Store
+.env
+.env.*
 __pycache__/
 *.py[cod]
 hand_landmarker.task
