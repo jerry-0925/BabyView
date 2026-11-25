@@ -1,3 +1,4 @@
 mediapipe>=0.10.14
 opencv-python>=4.10
 ultralytics>=8.3
+matplotlib>=3.3

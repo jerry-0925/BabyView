@@ -1,9 +1,11 @@
 # Egocentric hand tracking and ownership labels
 
-Two small video pipelines for first-person footage:
+Two ownership pipelines, a MediaPipe-only baseline, and a prediction report for first-person footage:
 
 1. `mediapipe_hand_tracks.py` detects hands, assigns short-lived track IDs, and exports 21 landmarks per visible hand.
 2. `fused_hand_tracks.py` detects and tracks hand boxes with YOLO, labels them as `self` (the camera wearer), `other` (someone else), or `unknown`, and adds MediaPipe landmarks when available. A MediaPipe miss does not suppress a YOLO detection.
+3. `wilor_hand_tracks.py` uses the WiLoR MLX detector and 2D keypoints with the same YOLO ownership checkpoint. This Apple Silicon experiment has known keypoint-quality limitations.
+4. `prediction_report.py` compares confidence, spatial spread, coverage, and temporal consistency from either ownership pipeline's JSON output.
 
 The package deliberately does **not** identify individual partners. It answers only wearer versus non-wearer.
 
@@ -13,10 +15,15 @@ The package deliberately does **not** identify individual partners. It answers o
 egocentric_hand_pipelines/
 ├── mediapipe_hand_tracks.py   # MediaPipe-only tracker
 ├── fused_hand_tracks.py       # YOLO hand tracks + optional MediaPipe landmarks
+├── wilor_hand_tracks.py       # Experimental WiLoR 2D + YOLO ownership
+├── prediction_report.py       # Offline HTML, PNG and JSON diagnostics
 ├── test_fused_hand_tracks.py  # Regression checks; no models needed
+├── test_prediction_report.py
+├── WILOR_EXPERIMENT.md        # Observed results and limitations
 ├── models/
 │   └── self_other_yolo11s_75e.pt # Included self/other YOLO11s checkpoint
 ├── requirements.txt
+├── requirements-wilor.txt
 ├── .gitignore
 └── README.md
 ```
@@ -154,6 +161,89 @@ To make labels more conservative, raise `--label-threshold` (for example, `0.70`
 
 ## Model development and evaluation
 
+### Prediction confidence, spread, and stability reports
+
+`prediction_report.py` reads fusion schema v2 and WiLoR experiment JSON exports.
+It generates a self-contained HTML report, a PNG figure, and machine-readable
+`metrics.json`. It needs no hand annotations and does not run inference again.
+Matplotlib, installed with the existing YOLO dependencies, is used for plotting.
+
+```sh
+.venv/bin/python prediction_report.py outputs/fused/fused_hand_tracks.json --names "YOLO + MediaPipe" --output outputs/fused_report
+.venv-wilor/bin/python prediction_report.py outputs/fused/fused_hand_tracks.json outputs/wilor_test/wilor_hand_tracks.json --names "YOLO + MediaPipe" "WiLoR + YOLO" --output outputs/comparison_report
+python3 -m unittest test_prediction_report.py
+```
+
+Use a new output directory for each report. Open `report.html` in a browser.
+Reports include:
+
+- Confidence distributions: count, mean, population standard deviation, range,
+  median, quartiles and 10th/90th percentiles. Detection scores and ownership
+  vote scores are kept separate; unknown ownership is not converted to zero.
+- Spatial spread: normalized box centers, box area fractions and a center heatmap.
+- Output coverage: frames with detections, zero-inclusive hands per frame,
+  self/other/unknown counts, landmark availability and fresh ownership matches.
+- Temporal behavior: track spans, consecutive detection runs, missing scheduled
+  updates within tracks, single-observation tracks, raw ownership flips,
+  smoothed label transitions, and box-center displacement between adjacent updates.
+- Per-track statistics and a timeline of detection counts.
+
+Predicted/carried rows are excluded. For stride > 1, coverage and gaps use the
+declared detector schedule. Track-gap fraction is missing updates divided by
+observed plus missing updates inside each track's first-to-last span. It does
+not include hands that never received a track or misses after the track ended.
+Center displacement includes genuine hand/camera motion and is not pure jitter.
+Raw flips require adjacent frames with fresh ownership predictions on both.
+
+These are descriptive statistics, not precision, recall or accuracy. Confidence
+values are model-specific and filtered by the run's detection threshold.
+Compare equivalent clips and settings, and inspect the overlays alongside the report.
+
+### Experimental WiLoR detector + YOLO ownership (Apple Silicon)
+
+The first local experiment is complete: see [results and limitations](WILOR_EXPERIMENT.md).
+Detector-only keypoints looked unreliable in inspected frames; treat this as an
+experimental comparison, not a validated landmark replacement.
+
+`wilor_hand_tracks.py` runs the [WiLoR MLX port](https://github.com/lyonsno/wilor-mlx)
+detector and its 21 two-dimensional keypoints on every frame. The existing
+75-epoch YOLO model runs independently and supplies ownership evidence through
+one-to-one box matching (IoU >= 0.20). Unmatched hands remain unknown unless the
+track has recent ownership evidence. Left/right handedness never determines ownership.
+
+This experiment loads only the 107 MB detector, with strict weight validation;
+it does not load WiLoR's 3D reconstruction model or MANO assets.
+The third-party port and its keypoints still require visual evaluation.
+Upstream [WiLoR model terms](https://github.com/rolpotamias/WiLoR#license)
+also need to be considered; downloaded experiment weights are excluded from Git.
+
+From the repository root, create an experiment environment:
+
+```sh
+python3 -m venv .venv-wilor
+.venv-wilor/bin/python -m pip install -r requirements-wilor.txt
+curl -L --fail https://huggingface.co/BasinShapers/wilor-mlx/resolve/main/hand-detector.safetensors -o models/hand-detector.safetensors
+.venv-wilor/bin/python wilor_hand_tracks.py --self-test
+.venv-wilor/bin/python wilor_hand_tracks.py "/path/to/clip.mp4" --output outputs/wilor_test --max-frames 900
+```
+
+The default processes the first 900 frames; use `--max-frames 0` for the whole
+video. The output directory must be new. `--device cpu` changes the ownership
+YOLO device; the WiLoR detector still requires Apple Silicon MLX.
+
+Outputs are `wilor_hand_tracks.mp4`, JSON, CSV, and `summary.json`.
+The `keypoints_2d_normalized` field contains 21 pairs of x/y coordinates, with
+no invented depth. The upstream pipeline does not expose per-keypoint confidence.
+Ownership scores remain uncalibrated votes. `ownership_matched` and
+`ownership_age_frames` distinguish fresh matches from retained labels.
+
+To create a side-by-side video, add
+`--baseline-video "/path/to/fused_hand_tracks.mp4"`. It must represent the same
+source starting at frame zero, with matching FPS and at least as many frames.
+The resulting `comparison.mp4` shows the baseline on the left and WiLoR on the
+right. Detection counts and processing FPS measure coverage and runtime, not
+accuracy; neither model's outputs are ground truth.
+
 BabyView annotations are not available for the current pilot. The changes above require no retraining and keep the existing 75-epoch EgoHands checkpoint. Local EgoCom clips can verify pipeline operation and reveal visible errors, but cannot establish BabyView accuracy. Smooth labels and higher output coverage do not establish correct ownership.
 
 If target-domain annotations become available later:
@@ -178,7 +268,7 @@ The included checkpoint is derived from the public [EgoHands dataset](https://vi
 This folder is a standalone Git repository. In GitHub Desktop:
 
 1. Choose **File → Add Local Repository**, then select this `egocentric_hand_pipelines` folder.
-2. Check that the repository contains the two pipelines, regression tests, README, requirements, `.gitignore`, and the included 75-epoch checkpoint.
+2. Check that the repository contains both ownership methods, the MediaPipe-only baseline, report script, regression tests, documentation, requirements, `.gitignore`, and the included 75-epoch checkpoint.
 3. Choose **Publish repository** to create its GitHub remote, selecting the desired account and visibility. If you already have a GitHub repository for this project, configure its URL under **Repository → Repository Settings → Remote** instead, and reconcile any existing history before pushing.
 
 The prepared local commit uses branch `codex/yolo-first-fusion`. No GitHub remote is configured by this preparation, and nothing has been pushed. Videos, generated outputs, Python caches, local environment files, and macOS metadata are ignored.
